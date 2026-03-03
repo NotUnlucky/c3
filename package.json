@@ -1,0 +1,16 @@
+﻿{
+  "name": "construct3-multiplayer-mvp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Construct 3 static export + websocket multiplayer server for Render",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
