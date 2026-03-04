@@ -1,9 +1,34 @@
-﻿const SEND_INTERVAL_MS = 50;
+﻿function registerWhenReady(cb) {
+  if (typeof globalThis.runOnStartup === "function") {
+    globalThis.runOnStartup(cb);
+    return;
+  }
+
+  const maxWaitMs = 10000;
+  const startedAt = Date.now();
+  const timer = setInterval(() => {
+    if (typeof globalThis.runOnStartup === "function") {
+      clearInterval(timer);
+      globalThis.runOnStartup(cb);
+      return;
+    }
+    if (Date.now() - startedAt > maxWaitMs) {
+      clearInterval(timer);
+      console.error("[netcode] Construct runtime did not expose runOnStartup in time.");
+    }
+  }, 50);
+}
+
+const SEND_INTERVAL_MS = 50;
 const SNAPSHOT_LERP_ALPHA = 0.25;
 const REMOTE_TIMEOUT_MS = 10000;
 
 function randomId(prefix = "p") {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function randomRoomCode() {
+  return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
 function pickRoomFromUI(runtime) {
@@ -13,6 +38,14 @@ function pickRoomFromUI(runtime) {
   if (!input) return "sala-1";
   const value = (input.text || "").trim();
   return value || "sala-1";
+}
+
+function setRoomInUI(runtime, value) {
+  const codeObj = runtime.objects.codigo;
+  if (!codeObj) return;
+  const input = codeObj.getFirstInstance();
+  if (!input) return;
+  input.text = value;
 }
 
 function pickNicknameFromUI(runtime) {
@@ -32,13 +65,23 @@ function setStatus(runtime, text) {
   txt.text = text;
 }
 
-runOnStartup(async (runtime) => {
+function normalizeLabel(v) {
+  return (v || "")
+    .toString()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+registerWhenReady(async (runtime) => {
   let ws = null;
   let joined = false;
   let myId = "";
   let roomId = "";
   let nickname = "";
   let lastSend = 0;
+  let didAttachMenuClickHandler = false;
 
   const remotes = new Map();
 
@@ -52,6 +95,24 @@ runOnStartup(async (runtime) => {
   function getLocalPlayer() {
     const o = runtime.objects.PlayerLocal;
     return o ? o.getFirstInstance() : null;
+  }
+
+  function isOnMapLayout() {
+    try {
+      return runtime.layout && runtime.layout.name === "mapa1";
+    } catch {
+      return false;
+    }
+  }
+
+  function goToMapLayout() {
+    try {
+      runtime.goToLayout("mapa1");
+      return true;
+    } catch (err) {
+      console.error("[netcode] Failed to go to layout mapa1", err);
+      return false;
+    }
   }
 
   function createRemotePlayer(x, y) {
@@ -87,12 +148,14 @@ runOnStartup(async (runtime) => {
     ws.addEventListener("open", () => {
       joined = true;
       setStatus(runtime, `Online - Sala: ${roomId}`);
-      ws.send(JSON.stringify({
-        type: "join",
-        roomId,
-        playerId: myId,
-        nickname
-      }));
+      ws.send(
+        JSON.stringify({
+          type: "join",
+          roomId,
+          playerId: myId,
+          nickname,
+        }),
+      );
     });
 
     ws.addEventListener("message", (ev) => {
@@ -128,7 +191,7 @@ runOnStartup(async (runtime) => {
               inst,
               targetX: Number(p.x) || 0,
               targetY: Number(p.y) || 0,
-              lastStateTs: now
+              lastStateTs: now,
             };
             remotes.set(p.playerId, remote);
           } else {
@@ -152,6 +215,7 @@ runOnStartup(async (runtime) => {
 
     ws.addEventListener("close", () => {
       joined = false;
+      ws = null;
       setStatus(runtime, "Offline");
       for (const remoteId of remotes.keys()) removeRemote(remoteId);
     });
@@ -186,26 +250,64 @@ runOnStartup(async (runtime) => {
     const player = getLocalPlayer();
     if (!player) return;
 
-    ws.send(JSON.stringify({
-      type: "state",
-      roomId,
-      playerId: myId,
-      nickname,
-      x: player.x,
-      y: player.y
-    }));
+    ws.send(
+      JSON.stringify({
+        type: "state",
+        roomId,
+        playerId: myId,
+        nickname,
+        x: player.x,
+        y: player.y,
+      }),
+    );
+  }
+
+  function handleMenuButtonClick(ev) {
+    const target = ev.target;
+    if (!target) return;
+
+    const label = normalizeLabel(target.value || target.textContent || "");
+    if (!label) return;
+
+    if (label.includes("criar sala")) {
+      const room = randomRoomCode();
+      setRoomInUI(runtime, room);
+      if (goToMapLayout()) {
+        setTimeout(connectAndJoin, 150);
+      }
+      return;
+    }
+
+    if (label.includes("entrar")) {
+      const current = pickRoomFromUI(runtime);
+      if (!current || current === "sala-1") {
+        setRoomInUI(runtime, "sala-1");
+      }
+      if (goToMapLayout()) {
+        setTimeout(connectAndJoin, 150);
+      }
+    }
   }
 
   runtime.addEventListener("beforeprojectstart", () => {
     setStatus(runtime, "Offline");
-    connectAndJoin();
+
+    if (!didAttachMenuClickHandler) {
+      didAttachMenuClickHandler = true;
+      document.addEventListener("click", handleMenuButtonClick, true);
+    }
 
     runtime.addEventListener("tick", () => {
+      if (isOnMapLayout() && !ws) {
+        connectAndJoin();
+      }
+
       const now = performance.now();
       if (now - lastSend >= SEND_INTERVAL_MS) {
         lastSend = now;
         sendLocalState();
       }
+
       updateRemotes();
     });
   });
